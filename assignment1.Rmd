@@ -1,0 +1,377 @@
+---
+title: "Kevin Gao - Assignment 1 (Data Selection and Initial Processing)"
+output: html_notebook
+---
+
+# Setup
+We first install all the required packages if necessary. On my environment, `rlang` was not up-to-date so I had to update it manually, but for clearity sake, the output and command for updating `rlang` are not included here.
+<br>
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+if (!requireNamespace("GEOmetadb", quietly = TRUE))
+  BiocManager::install("GEOmetadb")
+
+if (!requireNamespace("GEOquery", quietly = TRUE))
+  BiocManager::install("GEOquery")
+
+if (!requireNamespace("edgeR", quietly = TRUE))
+  BiocManager::install("edgeR")
+
+if (!requireNamespace("DESeq2", quietly = TRUE))
+  BiocManager::install("DESeq2")
+
+if (!requireNamespace("biomaRt", quietly = TRUE))
+  BiocManager::install("biomaRt")
+
+if (!requireNamespace("RSQLite", quietly = TRUE))
+  install.packages("RSQLite")
+
+if (!requireNamespace("pander", quietly = TRUE))
+  install.packages("pander")
+
+if (!requireNamespace("limma", quietly = TRUE))
+  BiocManager::install("limma")
+
+library("RSQLite")
+library("knitr")
+```
+
+# GEOmetadb
+Load GEOmetadb database file.
+<br>
+```{r}
+if (!file.exists("GEOmetadb.sqlite"))
+  GEOmetadb::getSQLiteFile()
+con <- dbConnect(SQLite(), "GEOmetadb.sqlite")
+```
+
+List tables and information
+<br>
+```{r}
+geoTables <- dbListTables(con)
+geoTables
+```
+Build query
+```{r}
+# function for building an SQL query for GEOmetadb
+buildQuery <- function(platformKeyword, technologyKeyword, organism, submissionDate, titleKeywords, suppFile) {
+  gseTitleKeywords <- paste(lapply(titleKeywords, function(x) sprintf("gse.title LIKE '%%%s%%'", x)))
+  gseTitleKeywords <- paste("(", paste(gseTitleKeywords, collapse = " OR "), ")")
+
+  sel <- "SELECT DISTINCT gse.title, gse.gse, gpl.title, gse.submission_date, gse.supplementary_file"
+  from <- "FROM gse JOIN gse_gpl ON gse_gpl.gse=gse.gse JOIN gpl ON gse_gpl.gpl=gpl.gpl"
+  techCondition <- sprintf("WHERE gpl.title LIKE '%%%s%%' AND gpl.technology LIKE '%%%s%%' AND", platformKeyword, technologyKeyword)
+  organismConstraint <- sprintf("gpl.organism LIKE '%%%s%%' AND", organism)
+  dateConstraint <- sprintf("gse.submission_date > '%s' AND", submissionDate)
+  titleConstraints <- gseTitleKeywords
+  suppFileConstraint <- sprintf("AND gse.supplementary_file LIKE '%%%s%%.txt%%'", tolower(suppFile))
+  sorting <- "ORDER BY gse.submission_date DESC"
+  sql <- paste(sel, from, techCondition, organismConstraint, dateConstraint, titleConstraints, suppFileConstraint, sorting, sep = " ")
+  return(sql)
+}
+```
+
+Query GEOmetadb
+```{r}
+gplTitleKeyword <- "HiSeq"
+gplTechKeyword <- "high-throughput sequencing"
+gplOrganismKeyword <- "Homo sapiens"
+gseDateConstraint <- '2017-01-01'
+gseTitleKeywords <- c("SARS-CoV-2", "BRCA1", "Cdk", "CKI", "MAPK", "caspase", "kinase")
+gseSuppfileKeyword <- "count"
+
+result <- dbGetQuery(con, buildQuery(gplTitleKeyword, gplTechKeyword, gplOrganismKeyword, gseDateConstraint, gseTitleKeywords, gseSuppfileKeyword))
+```
+
+Let's take a look at the size of the query result.
+```{r}
+dim(result)
+```
+
+# Selecting Dataset
+
+We selected the dataset GSE168797, *Cannabidiol Inhibits SARS-CoV-2 Replication through Induction of the Host ER Stress and Innate Immune Responses*. I found this study particularly interesting because the result of this study was mentioned in numerous news stories claiming "weed cures COVID". I would like to further investigate the data set accompanying the study and attempt to reproduce their results.
+
+Fetch the supplementary files
+<br>
+```{r}
+GEOquery::getGEOSuppFiles("GSE168797")
+# unzip the supplementary files
+GEOquery::gunzip("./GSE168797/GSE168797_Raw_gene_counts_matrix.txt.gz", overwrite = TRUE)
+```
+
+Open the raw count file
+```{r}
+filename <- "./GSE168797/GSE168797_Raw_gene_counts_matrix.txt"
+rawCount <- read.delim(filename, header = TRUE, check.name = FALSE, row.names = NULL)
+row.names(rawCount) <- rawCount[[1]]
+colnames(rawCount)[1] <- "ensembl_version"
+res <- pander::pander_return(head(rawCount[2:13]))
+```
+
+```{r}
+structure(res, class = "knitr_kable")
+```
+```{r}
+dim(rawCount)
+```
+As we can see, the dataset contains 25370 genes and 12 (one column is for the gene names) samples. Let's also find the duplicate genes.
+
+```{r}
+summarized_gene_counts <- sort(table(rawCount$ensembl), decreasing = TRUE)
+kable(summarized_gene_counts[1:3])
+```
+
+The result tells us that there is no duplicate gene names (at least before identifier mapping).
+
+# Define the Groups
+```{r}
+samples <- data.frame(lapply(colnames(rawCount)[2:13], function(x) {
+  splt = unlist(strsplit(x, split = "_"))
+  c(splt[1], unlist(strsplit(splt[2], split = "-"))[c(1,2)])
+}))
+rownames(samples) <- c("cbd_treatment", "infected", "patient")
+colnames(samples) <- colnames(rawCount)[2:13]
+samples <- data.frame(t(samples))
+```
+
+## Removing Ensembl Gene ID Version Number
+
+The Ensembl Gene ID in the original dataset contains a version number. Searching by Ensembl ID with version number does not seem to get a good coverage during identifier mapping, so we create a separate column for the Ensembl Gene ID without version number.
+
+```{r}
+ensembl_id <- unlist(lapply(rawCount$ensembl, FUN = function(x) { unlist(strsplit(x, split = "\\."))[1] } ))
+rawCount$ensembl_id <- ensembl_id
+row.names(rawCount) <- rawCount$ensembl_id
+```
+
+
+# Removing Low Counts
+
+```{r}
+cpms = edgeR::cpm(rawCount[,2:13])
+rownames(cpms) <- rawCount[,1]
+
+# 3 biological replicates
+keep = rowSums(cpms > 1) >= 3
+rawCount_filtered <- rawCount[keep,]
+```
+
+The dimension of the filtered dataset.
+```{r}
+dim(rawCount_filtered)
+```
+# Normalization
+We would like to normalize the dataset and remove any technical variations.
+
+## Examine Sample Distribution
+
+Plotting the sample distribution
+```{r}
+data2plot <- log2(edgeR::cpm(rawCount_filtered[,2:13]))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM", las = 2, cex = 0.5, cex.lab = 0.5, cex.axis = 0.5, main = "RNASeq Samples")
+abline(h = median(apply(data2plot, 2, median)), col = "green", lwd = 0.6, lty = "dashed")
+```
+```{r}
+counts_density <- apply(log2(edgeR::cpm(rawCount_filtered[,2:13])), 2, density)
+
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density)) {
+  xlim <- range(c(xlim, counts_density[[i]]$x));
+  ylim <- range(c(ylim, counts_density[[i]]$y))
+}
+cols <- rainbow(length(counts_density))
+ltys <- rep(1, length(counts_density))
+
+plot(counts_density[[1]], xlim = xlim, ylim = ylim, type = "n", ylab = "Smoothing density of log2-CPM", main = "Sample Distribution (unnormalized)", cex.lab = 0.85)
+for (i in 1:length(counts_density))
+  lines(counts_density[[i]], col = cols[i], lty = ltys[i])
+
+legend("topright", colnames(data2plot), col=cols, lty=ltys, cex=0.75, border="blue", text.col = "green4", merge = TRUE, bg = "gray90")
+```
+
+As shown by the plot above, the sample mean of the set of samples infected with SARS-CoV-2 but without CBD treatment deviates significantly from rest of the samples. This suggests a possibility that the gene expression patterns is different in cells infected by SARS-CoV-2 without CBD treatment.
+
+```{r}
+limma::plotMA(log2(rawCount_filtered[,c(2,5)]), main = "CBD_Infect-1 v.s. Veh_infect-1")
+```
+
+```{r}
+limma::plotMA(log2(rawCount_filtered[,c(2,3)]), main = "CBD_Infect-1 v.s. CBD_Infect-2")
+```
+
+## Apply TMM Normalization
+
+Since the sample distribution appears to be relatively normal (in terms of the shape of the distribution), we can use TMM normalization. Recall that the assumptions for TMM normalization are:
+- Differentially expressed genes and non-differentially expressed genes behave the same and technical variations affect them the same way;
+- The data is roughly balanced.
+<br>
+```{r}
+filtered_data_mat <- as.matrix(rawCount_filtered[,2:13])
+rownames(filtered_data_mat) <- rawCount_filtered$ensembl_id
+d = edgeR::DGEList(counts = filtered_data_mat, group = samples$cbd_treatment)
+
+d = edgeR::calcNormFactors(d)
+normalized_counts <- edgeR::cpm(d)
+```
+
+Plot the normalized data
+<br>
+```{r}
+counts_density_normalized <- apply(log2(normalized_counts), 2, density)
+
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density_normalized)) {
+  xlim <- range(c(xlim, counts_density_normalized[[i]]$x));
+  ylim <- range(c(ylim, counts_density_normalized[[i]]$y))
+}
+cols <- rainbow(length(counts_density_normalized))
+ltys <- rep(1, length(counts_density_normalized))
+
+plot(counts_density_normalized[[1]], xlim = xlim, ylim = ylim, type = "n", ylab = "Smoothing density of log2-CPM", main = "Sample Distribution (normalized)", cex.lab = 0.85)
+for (i in 1:length(counts_density_normalized))
+  lines(counts_density_normalized[[i]], col = cols[i], lty = ltys[i])
+legend("topright", colnames(data2plot), col=cols, lty=ltys, cex=0.75, border="blue", text.col = "green4", merge = TRUE, bg = "gray90")
+```
+
+Normalization corrects the large deviation of the means of untreated groups (green lines) from the groups treated with CBD, while still preserving some of the characteristics of the original sample distribution (e.g. the small bump at the left tail of the distribution).
+
+Question: Could it be better to use a bimodal distribution because of the intial bump?
+
+Replot the unnormalized version for comparison
+```{r}
+plot(counts_density[[1]], xlim = xlim, ylim = ylim, type = "n", ylab = "Smoothing density of log2-CPM", main = "Sample Distribution (unnormalized)", cex.lab = 0.85)
+for (i in 1:length(counts_density))
+  lines(counts_density[[i]], col = cols[i], lty = ltys[i])
+
+legend("topright", colnames(data2plot), col=cols, lty=ltys, cex=0.75, border="blue", text.col = "green4", merge = TRUE, bg = "gray90")
+```
+
+```{r}
+limma::plotMDS(log2(normalized_counts), labels=rownames(samples), col = c("darkgreen","blue")[factor(samples$cbd_treatment)], main = "Distance between samples")
+```
+We also got a good separation of groups after normalization.
+
+# Identifier Mapping
+
+Since the original dataset included the Ensembl IDs of the genes, we can use Ensembl BioMart to do the identifier mapping and obtain the HUGO gene symbol.
+<br>
+```{r}
+ensembl <- biomaRt::useMart("ensembl")
+ensembl <- biomaRt::useDataset("hsapiens_gene_ensembl", mart=ensembl)
+# since it takes some time to convert the identifiers, we would like to keep a local copy of the conversion file
+conversion_stash <- "id_conversion.rds"
+if (file.exists(conversion_stash)) {
+  id_conversion <- readRDS(conversion_stash)
+} else {
+  # I noticed that `ensembl_transcript_id_version` does not have a good coverage, so I stripped the version number
+  # and used the gene_id instead
+  id_conversion <- biomaRt::getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"),
+                                  filters = c("ensembl_gene_id"),
+                                  values = ensembl_id,
+                                  mart = ensembl)
+  saveRDS(id_conversion, conversion_stash)
+}
+```
+
+```{r}
+nrow(normalized_counts) - length(which(ensembl_id %in% id_conversion$ensembl_gene_id))
+```
+```{r}
+normalized_counts_annot <- merge(id_conversion, normalized_counts,
+                                 by.x = 1, by.y = 0, all.y=TRUE)
+
+ensembl_id_missing_gene <- normalized_counts_annot$ensembl_gene_id[
+  which(is.na(normalized_counts_annot$hgnc_symbol))]
+length(ensembl_id_missing_gene)
+```
+<br>
+We also have genes that did not get mapped to a name but has the empty string instead of NA as the identifier. We need to find those genes as well.
+<br>
+```{r}
+ensembl_id_missing_gene <- c(ensembl_id_missing_gene, normalized_counts_annot$ensembl_gene_id[
+                              which(normalized_counts_annot$hgnc_symbol == "")])
+length(ensembl_id_missing_gene)
+```
+<br>
+There is one duplicate identifier belonging to a pseudogene.
+<br>
+```{r}
+dup_id <- which(duplicated(normalized_counts_annot$hgnc_symbol)==TRUE)
+normalized_counts_annot[dup_id,]
+```
+
+The leaves us with 379 unmapped genes. Since there is no alternative name or identifiers provided in the original dataset, we have to remove them from our dataset.
+
+```{r}
+normalized_counts_annot <- normalized_counts_annot[!(normalized_counts_annot$ensembl_gene_id %in% ensembl_id_missing_gene),]
+normalized_counts_annot <- normalized_counts_annot[-dup_id,]
+```
+
+
+Set the row names to HUGO symbols.
+```{r}
+row.names(normalized_counts_annot) <- normalized_counts_annot$hgnc_symbol
+```
+
+
+The final dataset:
+```{r}
+head(normalized_counts_annot[3:14])
+```
+
+# Interpretation
+
+1. What are the control and test conditions of the dataset?
+<br>
+The control of the dataset is no treatment (cell treated with DMSO solvent) and no infection by SARS-CoV-2. The test conditions are the following:
+- Infection with SARS-CoV-2, no treatment
+- Infection with SARS-CoV-2, treatment with Cannabidiol
+- No infection, no treatment
+- No infection, treatment with Cannabidiol
+<br><br>
+There are 3 biological replicates for each condition, giving us a total of 12 samples.
+
+2. Why is the dataset of interest to you?
+<br>
+As mentioned earlier, the result of this study was cited by numerous news stories and social media posts claiming "weed cures COVID". I would like to further investigate the data set accompanying the study and attempt to reproduce and validate their results.
+
+3. Were there expression values that were not unique for specific genes?
+<br>
+There is one duplicate row for gene POLR2J4. It is a pseudogene, and the duplicate row is subsequently removed.
+
+4. Were there expression values that could not be mapped to current HUGO symbols?
+<br>
+Yes. A total of 379 genes were not successfully mapped to HUGO symbols. Some of them mapped to empty strings "" and others has NA value. Since the original dataset did not include any alternative names/identifiers other than the Ensembl ID, I removed those genes and their corresponding counts from the final dataset.
+
+5. How many outliers were removed?
+<br>
+43186 outliers with low counts were removed.
+
+6. How did you handle replicates?
+<br>
+Replicates were kpet in the final dataset.
+
+7. What is the final coverage of your dataset?
+<br>
+The final dataset included 13705 genes with unique identifiers.
+
+# References
+
+- Chen Y, Lun ATL, Smyth GK (2016). From reads to genes to pathways: differential expression analysis of RNA-Seq experiments using Rsubread and the
+  edgeR quasi-likelihood pipeline. F1000Research 5, 1438
+- Davis, S. and Meltzer, P. S. GEOquery: a bridge between the Gene Expression Omnibus (GEO) and BioConductor. Bioinformatics, 2007, 14, 1846-1847
+- Evans, C., Hardin, J., & Stoebel, D. M. (2018). Selecting between-sample RNA-Seq normalization methods from the perspective of their assumptions. Briefings in bioinformatics, 19(5), 776–792. https://doi.org/10.1093/bib/bbx008
+- Durinck, S., Spellman, P. T., Birney, E., & Huber, W. (2009). Mapping identifiers for the integration of genomic datasets with the R/Bioconductor package biomaRt. Nature - protocols, 4(8), 1184–1191. https://doi.org/10.1038/nprot.2009.97
+- Martin Morgan (2021). BiocManager: Access the Bioconductor Project Package Repository. R package version 1.30.16.
+  https://CRAN.R-project.org/package=BiocManager
+- McCarthy DJ, Chen Y and Smyth GK (2012). Differential expression analysis of multifactor RNA-Seq experiments with respect to biological
+  variation. Nucleic Acids Research 40, 4288-4297
+- Nguyen, L. C., Yang, D., Nicolaescu, V., Best, T. J., Ohtsuki, T., Chen, S.-N., Friesen, J. B., Drayman, N., Mohamed, A., Dann, C., Silva, D., Gula, H., Jones, K. A., Millis, J. M., Dickinson, B. C., Tay, S., Oakes, S. A., Pauli, G. F., Meltzer, D. O., … Rosner, M. R. (2021). Cannabidiol inhibits SARS-COV-2 replication and promotes the host innate immune response. Science Advances. https://www.science.org/doi/abs/10.1126/sciadv.abi6110
+- Robinson MD, McCarthy DJ and Smyth GK (2010). edgeR: a Bioconductor package for differential expression analysis of digital gene expression data.
+  Bioinformatics 26, 139-140
+- Zhu Y, Davis S, Stephens R, Meltzer PS, Chen Y. GEOmetadb: powerful alternative search engine for the Gene Expression Omnibus. Bioinformatics.
+  2008 Dec 1;24(23):2798-800. doi: 10.1093/bioinformatics/btn520. Epub 2008 Oct 7. PubMed PMID: 18842599; PubMed Central PMCID: PMC2639278.
+
