@@ -3,4 +3,17 @@ repository for bcb420-2022 for Kevin Gao
 
 # Assignment 1
 
-https://github.com/bcb420-2022/Kevin_Gao/blob/main/assignment1.nb.html
+## HTML Notebook File
+https://github.com/bcb420-2022/Kevin_Gao/blob/main/A1_KevinGao.html
+
+## Journal
+https://github.com/bcb420-2022/Kevin_Gao/wiki/Assignment-1
+
+
+# Assignment 2
+
+## HTML Notebook File
+https://github.com/bcb420-2022/Kevin_Gao/blob/main/A2_KevinGao.html
+
+## Journal
+https://github.com/bcb420-2022/Kevin_Gao/wiki/Assignment-2

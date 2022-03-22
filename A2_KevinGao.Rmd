@@ -9,7 +9,7 @@ output:
 
 # Overview
 
-```{r a1_source, include=FALSE, results='hide',echo=FALSE, message=FALSE, results='hide'}
+```{r a1_source, include=FALSE,echo=FALSE, message=FALSE}
 options(warn=-1)
 a1_output <- knitr::knit_child('A1_KevinGao.Rmd', quiet = TRUE)
 ```
@@ -27,7 +27,7 @@ We obtained the dataset from GEO with ID GSE168797, associated with the study *C
 
 Data normalization is performed using TMM with the edgeR package. Normalization corrects the large deviation of the means of untreated groups from the groups treated with CBD, while still preserving some of the characteristics of the original sample distribution.
 
-```{r normalized_data_plot, echo=FALSE, message=FALSE, results='hide'}
+```{r normalized_data_plot, message=FALSE}
 counts_density_normalized <- apply(log2(normalized_counts), 2, density)
 
 xlim <- 0; ylim <- 0
@@ -46,7 +46,7 @@ legend("topright", colnames(data2plot), col=cols, lty=ltys, cex=0.75, border="bl
 
 We observe separation of groups after normalization.
 
-```{r a1_mds, echo=FALSE, message=FALSE, results='hide'}
+```{r a1_mds, message=FALSE}
 limma::plotMDS(log2(normalized_counts), labels=rownames(samples), col = c("darkgreen","blue")[factor(samples$cbd_treatment)], main = "MDS plot after normalization showing distances between samples")
 legend("topleft", legend=rownames(samples), fill=c("darkgreen","blue")[factor(samples$cbd_treatment)])
 ```
@@ -59,7 +59,7 @@ Identifier mapping was performed using the package biomaRt with data from Ensemb
 
 In this section, we import and install the necessary packages for this assignment, in which we will conduct a differential expression analysis using the normalized dataset and a thresholded over-representation analysis.
 
-```{r a2_packages, echo=FALSE, message=FALSE, results='hide'}
+```{r a2_packages, message=FALSE}
 if (!requireNamespace("magrittr"))
   install.packages("magrittr")
 if (!requireNamespace("circlize", quietly = TRUE))
@@ -82,7 +82,7 @@ In this section, we are going to perform differential expression analysis.
 
 Let us first examine the normalized data.
 
-```{r normalized_data, echo=FALSE, message=FALSE, results='hide'}
+```{r normalized_data, message=FALSE}
 knitr::kable(d[1:10,1:6]$counts, caption = "Normalized gene counts") %>% kableExtra::kable_styling("striped")
 knitr::kable(d[1:10,1:6]$samples, caption = "Sample groups") %>% kableExtra::kable_styling("striped")
 ```
@@ -110,7 +110,7 @@ In order to perform statistical testing, we need a design matrix the defines our
 
 Hence, ideally, we would like to account for all three factors in our design matrix.
 
-```{r design_matrix, echo=FALSE, message=FALSE, results='hide'}
+```{r design_matrix, message=FALSE}
 model_design <- model.matrix(~ samples$patient + samples$cbd_treatment + samples$infected)
 model_design[,4] <- !model_design[,4]
 colnames(model_design)[4] <- "samples$cbd_treatmentCBD"
@@ -124,7 +124,7 @@ For our downstream analysis, we are going to use edgeR. We chose edgeR because i
 
 Let us the calculate the dispersion and plot to visualize the mean-variance relationship.
 
-```{r dispersion_calc, echo=FALSE, message=FALSE, results='hide'}
+```{r dispersion_calc, message=FALSE}
 d <- edgeR::DGEList(counts = normalized_counts_annot[,3:ncol(normalized_counts_annot)], group = samples$cbd_treatment)
 d <- edgeR::estimateDisp(d, model_design)
 ```
@@ -150,13 +150,13 @@ As demonstrated by the mean-variance plot above, we can see that the dispersion 
 
 Now, we have created the design matrix and verified the assumption for the data to be negative-binomially distributed, we can proceed to the next stage of our analysis and perform statistical testing and corrections to ensure that we only get significantly differentially expressed genes. We used the quasi-likelihood models since our dataset is from an RNASeq experiment and quasi-likelihood models are best suited to handle RNASeq data.
 
-```{r fit_ql, echo=FALSE, message=FALSE, results='hide'}
+```{r fit_ql, message=FALSE}
 fit <- edgeR::glmQLFit(d, model_design)
 ```
 
 Once we have fit the model, we can proceed to calculate differential expression. Recall that our goal is to verify the role of cannabidiol in affecting the replication ability of SARS-CoV-2, so we will be using `cbd_treatment` as the contrast.
 
-```{r test_ql, echo=FALSE, message=FALSE, results='hide'}
+```{r test_ql, message=FALSE}
 qlf <- edgeR::glmQLFTest(fit, coef = 'samples$cbd_treatmentCBD')
 qlf_diff_exp <- edgeR::topTags(qlf, sort.by = "PValue", n = nrow(normalized_counts_annot))
 knitr::kable(qlf_diff_exp[1:10,]$table, type="html", digits = 20, caption = "Top differentially expressed genes") %>%
@@ -165,22 +165,22 @@ knitr::kable(qlf_diff_exp[1:10,]$table, type="html", digits = 20, caption = "Top
 
 We can examine the number of genes pass the threshold and correction. We are using 0.05 as the threshold for p-value as it is commonly used in practice.
 
-```{r count_diff_pval, echo=FALSE, message=FALSE, results='hide'}
+```{r count_diff_pval, message=FALSE}
 # number of genes that passed the threshold
 sum(qlf_diff_exp$table$PValue < 0.05)
 ```
-```{r count_diff_fdr, echo=FALSE, message=FALSE, results='hide'}
+```{r count_diff_fdr, message=FALSE}
 # number of genes that passed correction
 sum(qlf_diff_exp$table$FDR < 0.05)
 ```
 
 The threshold of 0.05 gives us quite a lot of genes, in order to get more meaningful hits in the downstream gene enrichment analysis, we will make the thershold more stringent.
 
-```{r count_diff_pval_stringent, echo=FALSE, message=FALSE, results='hide'}
+```{r count_diff_pval_stringent, message=FALSE}
 # number of genes that passed the threshold
 sum(qlf_diff_exp$table$PValue < 0.01 & abs(qlf_diff_exp$table$logFC) > 1.5)
 ```
-```{r count_fdr_stringent, echo=FALSE, message=FALSE, results='hide'}
+```{r count_fdr_stringent, message=FALSE}
 # number of genes that passed correction
 sum(qlf_diff_exp$table$FDR < 0.01 & abs(qlf_diff_exp$table$logFC) > 1.5)
 ```
@@ -189,7 +189,7 @@ sum(qlf_diff_exp$table$FDR < 0.01 & abs(qlf_diff_exp$table$logFC) > 1.5)
 
 Now we can retrieve the list of differential expressed genes and visualize using different plots. We will first plot them on a volcano plot. Each gene is represented by a point in the plot. The horizontal axis of the plot is the $\log_2$ fold change and the vertical axis is the $-\log_{10}p$ which indicates the statistical significance of each gene (how likely the differential is due to actual biological variation).
 
-```{r volcano_plot, echo=FALSE, message=FALSE, results='hide'}
+```{r volcano_plot, message=FALSE}
 volcano_color_palette = rep('gray', times = nrow(qlf_diff_exp$table))
 volcano_color_palette[qlf_diff_exp$table$logFC < 0 & qlf_diff_exp$table$FDR < 0.01 & abs(qlf_diff_exp$table$logFC) > 1.5] <- 'blue'
 volcano_color_palette[qlf_diff_exp$table$logFC > 0 & qlf_diff_exp$table$FDR < 0.01 & abs(qlf_diff_exp$table$logFC) > 1.5] <- 'red'
@@ -207,7 +207,7 @@ legend("topright", legend=c("Downregulated in CBD treated cells","Upregulated in
 
 Next, we will visualize the upregulated and downregulated genes across different test conditions using a heatmap.
 
-```{r heatmap, echo=FALSE, message=FALSE, results='hide'}
+```{r heatmap, message=FALSE}
 diff_exp_lst <- qlf_diff_exp$table[qlf_diff_exp$table$FDR < 0.01 & abs(qlf_diff_exp$table$logFC),]
 diff_exp_lst$hgnc_symbol <- rownames(diff_exp_lst)
 
@@ -255,7 +255,7 @@ We use the R package for g:Profiler to perform the gene enrichment analysis. For
 
 ## Upregulated Genes
 
-```{r gprofiler_up, echo=FALSE, message=FALSE, results='hide'}
+```{r gprofiler_up, message=FALSE}
 up_top_terms_all <- gprofiler2::gost(query = rownames(upregulated_gene_lst), 
                                   organism = "hsapiens", 
                                   exclude_iea = TRUE,
@@ -275,7 +275,7 @@ knitr::kable(up_top_terms[1:10,], caption = "Top genesets using list of upregula
 ```
 For context, let's examine the top term from each data source.
 
-```{r up_top_term_per_category, echo=FALSE, message=FALSE, results='hide'}
+```{r up_top_term_per_category, message=FALSE}
 knitr::kable(rbind(up_top_terms[up_top_terms$source == "GO:BP",][1,],
                    up_top_terms[up_top_terms$source == "GO:MF",][1,],
                    up_top_terms[up_top_terms$source == "KEGG",][1,]),
@@ -288,7 +288,7 @@ We can visualize the distribution of top terms from each data source using an Ma
 gprofiler2::gostplot(up_top_terms_all) %>% plotly::layout(title = "Manhattan plot showing distribution of terms \nfrom each data source using list of upregulated genes", font = list(size = 10))
 ```
 
-```{r count_up_top_terms, echo=FALSE, message=FALSE, results='hide'}
+```{r count_up_top_terms, message=FALSE}
 length(up_top_terms$term_name)
 ```
 
@@ -296,7 +296,7 @@ length(up_top_terms$term_name)
 
 We do the same for the downregualted genes.
 
-```{r gprofiler_down, echo=FALSE, message=FALSE, results='hide'}
+```{r gprofiler_down, message=FALSE}
 down_top_terms_all <- gprofiler2::gost(query = rownames(downregulated_gene_lst), 
                                   organism = "hsapiens", 
                                   exclude_iea = TRUE,
@@ -315,7 +315,7 @@ down_top_terms <- data.frame(
 knitr::kable(down_top_terms[1:10,], caption = "Top genesets using list of downregulated genes") %>% kableExtra::kable_styling("striped")
 ```
 
-```{r down_top_term_per_category, echo=FALSE, message=FALSE, results='hide'}
+```{r down_top_term_per_category, message=FALSE}
 knitr::kable(rbind(down_top_terms[down_top_terms$source == "GO:BP",][1,],
                    down_top_terms[down_top_terms$source == "GO:MF",][1,],
                    down_top_terms[down_top_terms$source == "KEGG",][1,]),
@@ -328,7 +328,7 @@ Plot the Manhattan plot showing distribution of terms from each data source usin
 gprofiler2::gostplot(down_top_terms_all) %>% plotly::layout(title = "Manhattan plot showing distribution of terms\n from each data source using list of downregulated genes", font = list(size = 10))
 ```
 
-```{r count_down_top_terms, echo=FALSE, message=FALSE, results='hide'}
+```{r count_down_top_terms, message=FALSE}
 length(down_top_terms$term_name)
 ```
 
@@ -336,7 +336,7 @@ length(down_top_terms$term_name)
 
 Finally, for all differentially expressed genes.
 
-```{r gprofiler_overall, echo=FALSE, message=FALSE, results='hide'}
+```{r gprofiler_overall, message=FALSE}
 top_terms_all <- gprofiler2::gost(query = rownames(diff_exp_lst), 
                                   organism = "hsapiens", 
                                   exclude_iea = TRUE,
@@ -355,7 +355,7 @@ top_terms <- data.frame(
 knitr::kable(top_terms[1:10,], caption = "Top genesets using list of all differentially expressed genes") %>% kableExtra::kable_styling("striped")
 ```
 
-```{r top_term_per_category, echo=FALSE, message=FALSE, results='hide'}
+```{r top_term_per_category, message=FALSE}
 knitr::kable(rbind(top_terms[top_terms$source == "GO:BP",][1,],
                    top_terms[top_terms$source == "GO:MF",][1,],
                    top_terms[top_terms$source == "KEGG",][1,]),
@@ -366,7 +366,7 @@ knitr::kable(rbind(top_terms[top_terms$source == "GO:BP",][1,],
 gprofiler2::gostplot(top_terms_all) %>% plotly::layout(title = "Manhattan plot showing distribution of terms from each data source", font = list(size = 10))
 ```
 
-```{r count_top_terms, echo=FALSE, message=FALSE, results='hide'}
+```{r count_top_terms, message=FALSE}
 length(top_terms$term_name)
 ```
 
