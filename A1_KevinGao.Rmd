@@ -57,18 +57,18 @@ Build query
 ```{r}
 # function for building an SQL query for GEOmetadb
 buildQuery <- function(platformKeyword, technologyKeyword, organism, submissionDate, titleKeywords, suppFile) {
-  gseTitleKeywords <- paste(lapply(titleKeywords, function(x) sprintf("gse.title LIKE '%%%s%%'", x)))
-  gseTitleKeywords <- paste("(", paste(gseTitleKeywords, collapse = " OR "), ")")
+  gseTitleKeywords = paste(lapply(titleKeywords, function(x) sprintf("gse.title LIKE '%%%s%%'", x)))
+  gseTitleKeywords = paste("(", paste(gseTitleKeywords, collapse = " OR "), ")")
 
-  sel <- "SELECT DISTINCT gse.title, gse.gse, gpl.title, gse.submission_date, gse.supplementary_file"
-  from <- "FROM gse JOIN gse_gpl ON gse_gpl.gse=gse.gse JOIN gpl ON gse_gpl.gpl=gpl.gpl"
-  techCondition <- sprintf("WHERE gpl.title LIKE '%%%s%%' AND gpl.technology LIKE '%%%s%%' AND", platformKeyword, technologyKeyword)
-  organismConstraint <- sprintf("gpl.organism LIKE '%%%s%%' AND", organism)
-  dateConstraint <- sprintf("gse.submission_date > '%s' AND", submissionDate)
-  titleConstraints <- gseTitleKeywords
-  suppFileConstraint <- sprintf("AND gse.supplementary_file LIKE '%%%s%%.txt%%'", tolower(suppFile))
-  sorting <- "ORDER BY gse.submission_date DESC"
-  sql <- paste(sel, from, techCondition, organismConstraint, dateConstraint, titleConstraints, suppFileConstraint, sorting, sep = " ")
+  sel = "SELECT DISTINCT gse.title, gse.gse, gpl.title, gse.submission_date, gse.supplementary_file"
+  from = "FROM gse JOIN gse_gpl ON gse_gpl.gse=gse.gse JOIN gpl ON gse_gpl.gpl=gpl.gpl"
+  techCondition = sprintf("WHERE gpl.title LIKE '%%%s%%' AND gpl.technology LIKE '%%%s%%' AND", platformKeyword, technologyKeyword)
+  organismConstraint = sprintf("gpl.organism LIKE '%%%s%%' AND", organism)
+  dateConstraint = sprintf("gse.submission_date > '%s' AND", submissionDate)
+  titleConstraints = gseTitleKeywords
+  suppFileConstraint = sprintf("AND gse.supplementary_file LIKE '%%%s%%.txt%%'", tolower(suppFile))
+  sorting = "ORDER BY gse.submission_date DESC"
+  sql = paste(sel, from, techCondition, organismConstraint, dateConstraint, titleConstraints, suppFileConstraint, sorting, sep = " ")
   return(sql)
 }
 ```
@@ -83,6 +83,8 @@ gseTitleKeywords <- c("SARS-CoV-2", "BRCA1", "Cdk", "CKI", "MAPK", "caspase", "k
 gseSuppfileKeyword <- "count"
 
 result <- dbGetQuery(con, buildQuery(gplTitleKeyword, gplTechKeyword, gplOrganismKeyword, gseDateConstraint, gseTitleKeywords, gseSuppfileKeyword))
+
+dbDisconnect(con)
 ```
 
 Let's take a look at the size of the query result.
@@ -112,8 +114,9 @@ res <- pander::pander_return(head(rawCount[2:13]))
 ```
 
 ```{r}
-structure(res, class = "knitr_kable")
+structure(res, class = "knitr_kable", format="html")
 ```
+
 ```{r}
 dim(rawCount)
 ```
@@ -259,7 +262,8 @@ We also got a good separation of groups after normalization.
 Since the original dataset included the Ensembl IDs of the genes, we can use Ensembl BioMart to do the identifier mapping and obtain the HUGO gene symbol.
 <br>
 ```{r}
-ensembl <- biomaRt::useMart("ensembl")
+httr::set_config(httr::config(ssl_verifypeer = FALSE))
+ensembl <- biomaRt::useMart("ensembl", host="https://useast.ensembl.org")
 ensembl <- biomaRt::useDataset("hsapiens_gene_ensembl", mart=ensembl)
 # since it takes some time to convert the identifiers, we would like to keep a local copy of the conversion file
 conversion_stash <- "id_conversion.rds"
@@ -295,18 +299,24 @@ ensembl_id_missing_gene <- c(ensembl_id_missing_gene, normalized_counts_annot$en
                               which(normalized_counts_annot$hgnc_symbol == "")])
 length(ensembl_id_missing_gene)
 ```
+The leaves us with 379 unmapped genes. Since there is no alternative name or identifiers provided in the original dataset, we have to remove them from our dataset.
+
+```{r}
+normalized_counts_annot <- normalized_counts_annot[!(normalized_counts_annot$ensembl_gene_id %in% ensembl_id_missing_gene),]
+```
+
 <br>
 There is one duplicate identifier belonging to a pseudogene.
 <br>
+
 ```{r}
 dup_id <- which(duplicated(normalized_counts_annot$hgnc_symbol)==TRUE)
 normalized_counts_annot[dup_id,]
 ```
 
-The leaves us with 379 unmapped genes. Since there is no alternative name or identifiers provided in the original dataset, we have to remove them from our dataset.
+Remove the duplicates.
 
 ```{r}
-normalized_counts_annot <- normalized_counts_annot[!(normalized_counts_annot$ensembl_gene_id %in% ensembl_id_missing_gene),]
 normalized_counts_annot <- normalized_counts_annot[-dup_id,]
 ```
 

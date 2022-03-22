@@ -1,0 +1,411 @@
+---
+title: "Kevin Gao - Assignment 2: Differential Gene expression and Preliminary ORA"
+output: 
+  html_notebook:
+    toc: true
+    toc_depth: 2
+    mathjax: "https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.7/MathJax.js?config=TeX-MML-AM_CHTML"
+---
+
+# Overview
+
+```{r a1_source, include=FALSE, results='hide',echo=FALSE, message=FALSE, results='hide'}
+options(warn=-1)
+a1_output <- knitr::knit_child('assignment1.Rmd', quiet = TRUE)
+```
+
+In the previous assignment, we took the RNASeq data from the publication *Cannabidiol inhibits SARS-COV-2 replication and promotes the host innate immune response* by Nguyen et al., cleaned the data, performed normalization, gene identifier mapping, and some additional preliminary analysis on the dataset. As suggested by the title, the authors of the publication studied the effects of cannabidiol on SARS-CoV-2 replication and host's immune response. The authors hypothesized and concluded that cannabidiol inhibits SARS-CoV-2 replication by up-regulating the host IRE1α ribonuclease endoplasmic reticulum (ER) stress response and interferon signaling pathways. The experiment conditions from in the dataset can be categorized into
+
+- Infection with SARS-CoV-2, no treatment
+- Infection with SARS-CoV-2, treatment with Cannabidiol
+- No infection, no treatment
+- No infection, treatment with Cannabidiol
+
+with 3 replicates for each test condition.
+
+We obtained the dataset from GEO with ID GSE168797, associated with the study *Cannabidiol inhibits SARS-COV-2 replication and promotes the host innate immune response* published on Science Advances. Out of the total of 57832 genes, 13705 remained after removing low counts and genes with duplicate identifiers.
+
+Data normalization is performed using TMM with the edgeR package. Normalization corrects the large deviation of the means of untreated groups from the groups treated with CBD, while still preserving some of the characteristics of the original sample distribution.
+
+```{r normalized_data_plot, echo=FALSE, message=FALSE, results='hide'}
+counts_density_normalized <- apply(log2(normalized_counts), 2, density)
+
+xlim <- 0; ylim <- 0
+for (i in 1:length(counts_density_normalized)) {
+  xlim <- range(c(xlim, counts_density_normalized[[i]]$x));
+  ylim <- range(c(ylim, counts_density_normalized[[i]]$y))
+}
+cols <- rainbow(length(counts_density_normalized))
+ltys <- rep(1, length(counts_density_normalized))
+
+plot(counts_density_normalized[[1]], xlim = xlim, ylim = ylim, type = "n", ylab = "Smoothing density of log2-CPM", main = "Distribution of count density for each experiment condition (normalized)", cex.lab = 0.85)
+for (i in 1:length(counts_density_normalized))
+  lines(counts_density_normalized[[i]], col = cols[i], lty = ltys[i])
+legend("topright", colnames(data2plot), col=cols, lty=ltys, cex=0.75, border="blue", text.col = "green4", merge = TRUE, bg = "gray90")
+```
+
+We observe separation of groups after normalization.
+
+```{r a1_mds, echo=FALSE, message=FALSE, results='hide'}
+limma::plotMDS(log2(normalized_counts), labels=rownames(samples), col = c("darkgreen","blue")[factor(samples$cbd_treatment)], main = "MDS plot after normalization showing distances between samples")
+legend("topleft", legend=rownames(samples), fill=c("darkgreen","blue")[factor(samples$cbd_treatment)])
+```
+
+We will revisit this figure later when performing differential gene expression analysis.
+
+Identifier mapping was performed using the package biomaRt with data from Ensembl. The Ensembl gene IDs in the original dataset are mapped to the corresponding HUGO gene symbols. The final dataset included 13705 genes with unique identifiers.
+
+# Setup
+
+In this section, we import and install the necessary packages for this assignment, in which we will conduct a differential expression analysis using the normalized dataset and a thresholded over-representation analysis.
+
+```{r a2_packages, echo=FALSE, message=FALSE, results='hide'}
+if (!requireNamespace("magrittr"))
+  install.packages("magrittr")
+if (!requireNamespace("circlize", quietly = TRUE))
+    install.packages("circlize")
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE))
+    BiocManager::install("ComplexHeatmap")
+if (!requireNamespace("gprofiler2", quietly = TRUE))
+    BiocManager::install("gprofiler2")
+
+# edgeR and other packages are imported in A1, which is sourced at the beginning of the notebook
+
+library(magrittr)
+
+knitr::opts_chunk$set(message = FALSE)
+```
+
+# Differential Expression Analysis using edgeR
+
+In this section, we are going to perform differential expression analysis.
+
+Let us first examine the normalized data.
+
+```{r normalized_data, echo=FALSE, message=FALSE, results='hide'}
+knitr::kable(d[1:10,1:6]$counts, caption = "Normalized gene counts") %>% kableExtra::kable_styling("striped")
+knitr::kable(d[1:10,1:6]$samples, caption = "Sample groups") %>% kableExtra::kable_styling("striped")
+```
+## Workflow
+
+We will be calculating differential expression following this general workflow:
+
+1. Create deisng matrix. We will ensure that all factors that could contribute to differential expression is accounted for in the design matrix.
+
+2. Use a mean-variance plot to confirm that the data follows the negative binomial distribution assumption for using the quasi-likelihood model in edgeR.
+
+3. Fit our data to the model and calculated p-value and corrected p-value.
+
+4. Use a threshold to extract differentially expressed genes with statistically significant differences.
+
+5. Plot and visualize.
+
+## Creating the Design Matrix
+
+In order to perform statistical testing, we need a design matrix the defines our model. Notice that in our dataset, there are three factors: 
+
+1. Treatment with CBD
+2. Infection status (infected or not)
+3. Patient
+
+Hence, ideally, we would like to account for all three factors in our design matrix.
+
+```{r design_matrix, echo=FALSE, message=FALSE, results='hide'}
+model_design <- model.matrix(~ samples$patient + samples$cbd_treatment + samples$infected)
+model_design[,4] <- !model_design[,4]
+colnames(model_design)[4] <- "samples$cbd_treatmentCBD"
+knitr::kable(model_design, caption = "Design matrix") %>%
+  kableExtra::kable_styling("striped")
+```
+
+## Distribution of Data
+
+For our downstream analysis, we are going to use edgeR. We chose edgeR because it is specifically designed for RNASeq data. However, one important underlying assumption for using the quasi-likelihood model is that the data follows a negative binomial distribution. We need to verify that our dataset indeed meets that assumption.
+
+Let us the calculate the dispersion and plot to visualize the mean-variance relationship.
+
+```{r dispersion_calc, echo=FALSE, message=FALSE, results='hide'}
+d <- edgeR::DGEList(counts = normalized_counts_annot[,3:ncol(normalized_counts_annot)], group = samples$cbd_treatment)
+d <- edgeR::estimateDisp(d, model_design)
+```
+
+```{r mean_var_plot}
+edgeR::plotMeanVar(d,
+                   show.raw.vars = TRUE,
+                   show.tagwise.vars = TRUE,
+                   NBline = TRUE,
+                   show.ave.raw.vars = TRUE,
+                   show.binned.common.disp.vars = TRUE,
+                   main = "Mean-Variance Plot for Variance and Dispersion of Our Data")
+# display legend
+legend("topleft", 
+       legend=c("Raw Data", "Tagwise Dispersion", "Average Raw Variances", 
+                "Binned Common Dispersion", "Negative Binomial Line"), 
+       col = c("grey", "lightblue", "maroon", "red", "dodgerblue2"), pch=c(1,1,4,4,NA), lty=c(0,0,0,0,1), lwd=c(1,1,1,1,2), cex=0.6)
+```
+
+As demonstrated by the mean-variance plot above, we can see that the dispersion and variance of our data indeed roughly follows the negative binomial distribution.
+
+## Analysis Using edgeR
+
+Now, we have created the design matrix and verified the assumption for the data to be negative-binomially distributed, we can proceed to the next stage of our analysis and perform statistical testing and corrections to ensure that we only get significantly differentially expressed genes. We used the quasi-likelihood models since our dataset is from an RNASeq experiment and quasi-likelihood models are best suited to handle RNASeq data.
+
+```{r fit_ql, echo=FALSE, message=FALSE, results='hide'}
+fit <- edgeR::glmQLFit(d, model_design)
+```
+
+Once we have fit the model, we can proceed to calculate differential expression. Recall that our goal is to verify the role of cannabidiol in affecting the replication ability of SARS-CoV-2, so we will be using `cbd_treatment` as the contrast.
+
+```{r test_ql, echo=FALSE, message=FALSE, results='hide'}
+qlf <- edgeR::glmQLFTest(fit, coef = 'samples$cbd_treatmentCBD')
+qlf_diff_exp <- edgeR::topTags(qlf, sort.by = "PValue", n = nrow(normalized_counts_annot))
+knitr::kable(qlf_diff_exp[1:10,]$table, type="html", digits = 20, caption = "Top differentially expressed genes") %>%
+  kableExtra::kable_styling("striped")
+```
+
+We can examine the number of genes pass the threshold and correction. We are using 0.05 as the threshold for p-value as it is commonly used in practice.
+
+```{r count_diff_pval, echo=FALSE, message=FALSE, results='hide'}
+# number of genes that passed the threshold
+sum(qlf_diff_exp$table$PValue < 0.05)
+```
+```{r count_diff_fdr, echo=FALSE, message=FALSE, results='hide'}
+# number of genes that passed correction
+sum(qlf_diff_exp$table$FDR < 0.05)
+```
+
+The threshold of 0.05 gives us quite a lot of genes, in order to get more meaningful hits in the downstream gene enrichment analysis, we will make the thershold more stringent.
+
+```{r count_diff_pval_stringent, echo=FALSE, message=FALSE, results='hide'}
+# number of genes that passed the threshold
+sum(qlf_diff_exp$table$PValue < 0.01 & abs(qlf_diff_exp$table$logFC) > 1.5)
+```
+```{r count_fdr_stringent, echo=FALSE, message=FALSE, results='hide'}
+# number of genes that passed correction
+sum(qlf_diff_exp$table$FDR < 0.01 & abs(qlf_diff_exp$table$logFC) > 1.5)
+```
+
+## Visualization of Differentially Expressed Genes
+
+Now we can retrieve the list of differential expressed genes and visualize using different plots. We will first plot them on a volcano plot. Each gene is represented by a point in the plot. The horizontal axis of the plot is the $\log_2$ fold change and the vertical axis is the $-\log_{10}p$ which indicates the statistical significance of each gene (how likely the differential is due to actual biological variation).
+
+```{r volcano_plot, echo=FALSE, message=FALSE, results='hide'}
+volcano_color_palette = rep('gray', times = nrow(qlf_diff_exp$table))
+volcano_color_palette[qlf_diff_exp$table$logFC < 0 & qlf_diff_exp$table$FDR < 0.01 & abs(qlf_diff_exp$table$logFC) > 1.5] <- 'blue'
+volcano_color_palette[qlf_diff_exp$table$logFC > 0 & qlf_diff_exp$table$FDR < 0.01 & abs(qlf_diff_exp$table$logFC) > 1.5] <- 'red'
+
+plot(qlf_diff_exp$table$logFC, 
+     -log(qlf_diff_exp$table$PValue, base=10), 
+     col = volcano_color_palette,
+     xlab = "log2 fold change",
+     ylab = "-log10 p",
+     main = "Volcano plot showing upregulated and downregulated genes"
+    )
+
+legend("topright", legend=c("Downregulated in CBD treated cells","Upregulated in CBD treated cells", "Not significant"),fill = c("blue", "red", "grey"), cex = 0.5)
+```
+
+Next, we will visualize the upregulated and downregulated genes across different test conditions using a heatmap.
+
+```{r heatmap, echo=FALSE, message=FALSE, results='hide'}
+diff_exp_lst <- qlf_diff_exp$table[qlf_diff_exp$table$FDR < 0.01 & abs(qlf_diff_exp$table$logFC),]
+diff_exp_lst$hgnc_symbol <- rownames(diff_exp_lst)
+
+# normalized counts of differentially expressed genes
+mat_count_normalized_diff <- normalized_counts_annot[diff_exp_lst$hgnc_symbol, 3:ncol(normalized_counts_annot)]
+# rescale the counts
+mat_count_normalized_diff <- t(scale(t(mat_count_normalized_diff)))
+heatmap_color_palette <- circlize::colorRamp2(c(min(mat_count_normalized_diff), 0, max(mat_count_normalized_diff)),
+                                              c("blue", "white", "red"))
+ComplexHeatmap::Heatmap(as.matrix(mat_count_normalized_diff),
+                        name = "scaled normalized count",
+                        cluster_rows = TRUE,
+                        cluster_columns = TRUE, 
+                        show_row_dend = FALSE, 
+                        show_column_dend = FALSE, 
+                        col = heatmap_color_palette, 
+                        show_column_names = TRUE, 
+                        show_row_names = FALSE, 
+                        show_heatmap_legend = TRUE,
+                        column_title = "Samples",
+                        row_title = "Genes",
+                        use_raster = TRUE)
+```
+
+## Discussion
+
+1. Initially, I used the p-value of 0.05 as it is widely used in practice. This gives us 5501 genes prior to correction. This is quite a large number of genes, so we changed the p-value threshold to 0.01 to limit the number of genes included. We further added the criteria that a gene must have an absolute log fold change greater than 1.5. By doing so, we are contraining ourselves to only get the genes that are highly differentially expressed with high statistical significance.
+
+2. For correction, we used Benjamini-Hochberg. The two main methods discussed for correcting family-wise false discovery rate are Bonferroni and Benjamini-Hochberg correction. We want to get meaningful hits without excluding statistically significant ones. Bonferroni's method is overly stringent so it is not quite suitable for our purposes. Using Benjamini-Hochberg will give us a richer set of genes that we can use for downstream analysis.
+
+3. Volcano plot shown above. Note that we also applied the restriction that only genes with aboslute log fold change greater than 1.5 are to be included.
+
+4. There is significant clustering within conditions. This suggests that the test condition (CBD v.s. no CBD) does have a significant effect on gene expressions.
+
+# Thresholded Overrepresentation Analysis using g:Profiler
+
+For the final part of this assignment, we will perform a thresholded overrepresentation analysis using g:Profiler. In the previous section, we have compiled a list of differentially expressed genes. Here, we want to further divide them into upregulated and downregulated genes.
+
+```{r split_updownregulated}
+upregulated_gene_lst <- diff_exp_lst[diff_exp_lst$logFC > 0,]
+downregulated_gene_lst <- diff_exp_lst[diff_exp_lst$logFC < 0,]
+```
+
+We use the R package for g:Profiler to perform the gene enrichment analysis. For correction, we used FDR as it is less stringent than Bonferroni and is introduced as the preferred correction method in class. We used GO Biological Process, GO Molecular Function, and KEGG as those are the ones used by the author of the original publication. For a more detailed overview of the workflow, please refer to the Discussion subsection located at the end of this section.
+
+## Upregulated Genes
+
+```{r gprofiler_up, echo=FALSE, message=FALSE, results='hide'}
+up_top_terms_all <- gprofiler2::gost(query = rownames(upregulated_gene_lst), 
+                                  organism = "hsapiens", 
+                                  exclude_iea = TRUE,
+                                  correction_method = "fdr",
+                                  sources = c("GO:BP", "GO:MF", "KEGG"))
+
+up_top_terms <- data.frame(
+  term_name = up_top_terms_all$result$term_name[up_top_terms_all$result$term_size < 500 &
+                                               up_top_terms_all$result$term_size > 2],
+  term_id = up_top_terms_all$result$term_id[up_top_terms_all$result$term_size < 500 &
+                                           up_top_terms_all$result$term_size > 2],
+  source = up_top_terms_all$result$source[up_top_terms_all$result$term_size < 500 &
+                                         up_top_terms_all$result$term_size > 2]
+)
+
+knitr::kable(up_top_terms[1:10,], caption = "Top genesets using list of upregulated genes") %>% kableExtra::kable_styling("striped")
+```
+For context, let's examine the top term from each data source.
+
+```{r up_top_term_per_category, echo=FALSE, message=FALSE, results='hide'}
+knitr::kable(rbind(up_top_terms[up_top_terms$source == "GO:BP",][1,],
+                   up_top_terms[up_top_terms$source == "GO:MF",][1,],
+                   up_top_terms[up_top_terms$source == "KEGG",][1,]),
+             caption = "Top terms from each data source using list of upregulated genes") %>%
+  kableExtra::kable_styling("striped")
+```
+We can visualize the distribution of top terms from each data source using an Manhattan plot. This is the distribution of terms prior to removing large terms with over 500 genes.
+
+```{r up_dist_plot}
+gprofiler2::gostplot(up_top_terms_all) %>% plotly::layout(title = "Manhattan plot showing distribution of terms \nfrom each data source using list of upregulated genes", font = list(size = 10))
+```
+
+```{r count_up_top_terms, echo=FALSE, message=FALSE, results='hide'}
+length(up_top_terms$term_name)
+```
+
+## Downregulated Genes
+
+We do the same for the downregualted genes.
+
+```{r gprofiler_down, echo=FALSE, message=FALSE, results='hide'}
+down_top_terms_all <- gprofiler2::gost(query = rownames(downregulated_gene_lst), 
+                                  organism = "hsapiens", 
+                                  exclude_iea = TRUE,
+                                  correction_method = "fdr",
+                                  sources = c("GO:BP", "GO:MF", "KEGG"))
+
+down_top_terms <- data.frame(
+  term_name = down_top_terms_all$result$term_name[down_top_terms_all$result$term_size < 500 &
+                                                 down_top_terms_all$result$term_size > 2],
+  term_id = down_top_terms_all$result$term_id[down_top_terms_all$result$term_size < 500 &
+                                             down_top_terms_all$result$term_size > 2],
+  source = down_top_terms_all$result$source[down_top_terms_all$result$term_size < 500 &
+                                           down_top_terms_all$result$term_size > 2]
+)
+
+knitr::kable(down_top_terms[1:10,], caption = "Top genesets using list of downregulated genes") %>% kableExtra::kable_styling("striped")
+```
+
+```{r down_top_term_per_category, echo=FALSE, message=FALSE, results='hide'}
+knitr::kable(rbind(down_top_terms[down_top_terms$source == "GO:BP",][1,],
+                   down_top_terms[down_top_terms$source == "GO:MF",][1,],
+                   down_top_terms[down_top_terms$source == "KEGG",][1,]),
+             caption = "Top terms from each data source using list of downregulated genes") %>%
+  kableExtra::kable_styling("striped")
+```
+Plot the Manhattan plot showing distribution of terms from each data source using list of downregulated genes.
+
+```{r down_dist_plot}
+gprofiler2::gostplot(down_top_terms_all) %>% plotly::layout(title = "Manhattan plot showing distribution of terms\n from each data source using list of downregulated genes", font = list(size = 10))
+```
+
+```{r count_down_top_terms, echo=FALSE, message=FALSE, results='hide'}
+length(down_top_terms$term_name)
+```
+
+## All Differentially Expressed Genes
+
+Finally, for all differentially expressed genes.
+
+```{r gprofiler_overall, echo=FALSE, message=FALSE, results='hide'}
+top_terms_all <- gprofiler2::gost(query = rownames(diff_exp_lst), 
+                                  organism = "hsapiens", 
+                                  exclude_iea = TRUE,
+                                  correction_method = "fdr",
+                                  sources = c("GO:BP", "GO:MF", "KEGG"))
+
+top_terms <- data.frame(
+  term_name = top_terms_all$result$term_name[top_terms_all$result$term_size < 500 &
+                                            top_terms_all$result$term_size > 2],
+  term_id = top_terms_all$result$term_id[top_terms_all$result$term_size < 500 &
+                                        top_terms_all$result$term_size > 2],
+  source = top_terms_all$result$source[top_terms_all$result$term_size < 500 &
+                                      top_terms_all$result$term_size > 2]
+)
+
+knitr::kable(top_terms[1:10,], caption = "Top genesets using list of all differentially expressed genes") %>% kableExtra::kable_styling("striped")
+```
+
+```{r top_term_per_category, echo=FALSE, message=FALSE, results='hide'}
+knitr::kable(rbind(top_terms[top_terms$source == "GO:BP",][1,],
+                   top_terms[top_terms$source == "GO:MF",][1,],
+                   top_terms[top_terms$source == "KEGG",][1,]),
+             caption = "Top terms from each data source using list of all differentially expressed genes") %>%
+  kableExtra::kable_styling("striped")
+```
+```{r all_dist_plot}
+gprofiler2::gostplot(top_terms_all) %>% plotly::layout(title = "Manhattan plot showing distribution of terms from each data source", font = list(size = 10))
+```
+
+```{r count_top_terms, echo=FALSE, message=FALSE, results='hide'}
+length(top_terms$term_name)
+```
+
+## Discussion
+
+1. We used g:Profiler as we have extensively discussed about it in class. It has a nice web-based interface as well as easy-to-use APIs in the form of an R package. Furthermore, the data sources on g:Profiler is frequently updated and include the data sources that we are most interested in.
+
+2. We used GO Biological Process, GO Molecular Function, and KEGO. We chose these data sources since they are also used by the author of the original paper from which I obtained the dataset. However, since KEGO is a commercial data source, if it was not for that fact that the original paper used it, I would personally refrain from using it. The original author also used other data sources including Canonical Pathways but since it is not part of g:Profiler, we did not include these data sources. The annotation source versions are as follows: Ensembl 105, Ensembl Genomes 52 (database built on 2022-02-14)
+
+3. For all three analysis (using upregulated, downregulated, all differentially expressed), we used a threshold between 2 and 500. We set the upper bound to 500 because we do not want to include overly broad and generic terms that will not give us meaningful insights into the roles of the differentially expressed genes. The set of upregulated genes returned 433 genesets; the set of downregulated genes returned 560 genesets; the set of all differentially expressed genes returned 616 gene sets.
+
+4. The result using the whole list (set of all differentially expressed genes) is more predominantly represented by the downregulated genes. It also does not provide a lot of insights into the roles of the genes as it is a mix of drastically different and seemingly unrelated terms (e.g. mitotic nuclear division, organelle fission, response to endoplasmic reticulum stress, etc.). However, by using separating into upregualted and downregulated genes and performing the gene enrichment analysis separately, we get more meaningful terms: the upregualted genes are mostly associated with pathways and processes involving endoplasmic reticulum whereas the downregulated genes are mostly associated with the cell cycle.
+
+
+# Interpretation
+
+1. Yes. The overrepresentation analysis results support the conclusion discussed in the original paper. The original paper claims that CBD treatment can inhibit SARS-CoV-2 replication through the host's ER stress response pathway. Although we were not able to verify whether or not this has any affect on SARS-CoV-2 replication, we are able to confirm based on the top terms returned by the overrepresentation analysis that the genes associated with ER stress response are indeed upregulated in the samples treated with CBD.
+
+2. The conclusion that CBD is correlated to reduced risk or severity of SARS-CoV-2 is supported by testing adult patients as presented by the original paper. There are also other papers who discussed the role of CBD in SARS-CoV-2 infection (van Breeman et al.). The result from our overrepresentation analysis is supported by the original paper, in which the author has also performed gene enrichment analysis with similar outcomes. However, since this is still an early research in this topic and SARS-CoV-2 continues to evolve, there does not seem to be other unrelated groups who could provide additional supporting evidence to our results from the overrepresentation analysis besides the original paper.
+
+# Journal
+
+Link to my journal entry for this assignment: https://github.com/bcb420-2022/Kevin_Gao/wiki/Assignment-2
+
+# References
+
+- Chen Y, Lun ATL, Smyth GK (2016). From reads to genes to pathways: differential expression analysis of RNA-Seq experiments using Rsubread and the
+  edgeR quasi-likelihood pipeline. F1000Research 5, 1438
+- Durinck, S., Spellman, P. T., Birney, E., & Huber, W. (2009). Mapping identifiers for the integration of genomic datasets with the R/Bioconductor package biomaRt. Nature - protocols, 4(8), 1184–1191. https://doi.org/10.1038/nprot.2009.97
+- Martin Morgan (2021). BiocManager: Access the Bioconductor Project Package Repository. R package version 1.30.16.
+  https://CRAN.R-project.org/package=BiocManager
+- McCarthy DJ, Chen Y and Smyth GK (2012). Differential expression analysis of multifactor RNA-Seq experiments with respect to biological
+  variation. Nucleic Acids Research 40, 4288-4297
+- Nguyen, L. C., Yang, D., Nicolaescu, V., Best, T. J., Ohtsuki, T., Chen, S.-N., Friesen, J. B., Drayman, N., Mohamed, A., Dann, C., Silva, D., Gula, H., Jones, K. A., Millis, J. M., Dickinson, B. C., Tay, S., Oakes, S. A., Pauli, G. F., Meltzer, D. O., … Rosner, M. R. (2021). Cannabidiol inhibits SARS-COV-2 replication and promotes the host innate immune response. Science Advances. https://www.science.org/doi/abs/10.1126/sciadv.abi6110
+- Robinson MD, McCarthy DJ and Smyth GK (2010). edgeR: a Bioconductor package for differential expression analysis of digital gene expression data.
+  Bioinformatics 26, 139-140
+- Gu, Z. (2016) Complex heatmaps reveal patterns and correlations in multidimensional genomic data. Bioinformatics.
+- Kolberg L, Raudvere U, Kuzmin I, Vilo J, Peterson H (2020). “gprofiler2- an R package for gene list functional enrichment
+analysis and namespace conversion toolset g:Profiler.” _F1000Research_, *9 (ELIXIR)*(709). R package version 0.2.1.
+- Stefan Milton Bache and Hadley Wickham (2020). magrittr: A Forward-Pipe Operator for R. https://magrittr.tidyverse.org,
+  https://github.com/tidyverse/magrittr.
+- van Breemen, R. B., Muchiri, R. N., Bates, T. A., Weinstein, J. B., Leier, H. C., Farley, S., & Tafesse, F. G. (2022). Cannabinoids Block Cellular Entry of SARS-CoV-2 and the Emerging Variants. Journal of natural products, 85(1), 176–184. https://doi.org/10.1021/acs.jnatprod.1c00946
