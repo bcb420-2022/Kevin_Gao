@@ -11,7 +11,7 @@ output:
 
 ```{r a1_source, include=FALSE, results='hide',echo=FALSE, message=FALSE, results='hide'}
 options(warn=-1)
-a1_output <- knitr::knit_child('assignment1.Rmd', quiet = TRUE)
+a1_output <- knitr::knit_child('A1_KevinGao.Rmd', quiet = TRUE)
 ```
 
 In the previous assignment, we took the RNASeq data from the publication *Cannabidiol inhibits SARS-COV-2 replication and promotes the host innate immune response* by Nguyen et al., cleaned the data, performed normalization, gene identifier mapping, and some additional preliminary analysis on the dataset. As suggested by the title, the authors of the publication studied the effects of cannabidiol on SARS-CoV-2 replication and host's immune response. The authors hypothesized and concluded that cannabidiol inhibits SARS-CoV-2 replication by up-regulating the host IRE1α ribonuclease endoplasmic reticulum (ER) stress response and interferon signaling pathways. The experiment conditions from in the dataset can be categorized into
