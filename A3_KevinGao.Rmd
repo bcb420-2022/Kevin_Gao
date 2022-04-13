@@ -210,11 +210,11 @@ kable(head(gsea_neg[,c("description", "src", "SIZE", "NES", "ES")]), caption = "
 We also present the enrichment plots for some of the top terms associated with the upregulated genes.
 
 
-![Figure 1: Enrichment plot for "UNFOLDED PROTEIN RESPONSE" from Reactome](enrichment_plot_UPR.png)
+![Figure 1: Enrichment plot for "UNFOLDED PROTEIN RESPONSE" from Reactome](a3figs/enrichment_plot_UPR.png)
 
 <br>
 
-![Figure 2: Enrichment plot for "Response to ER stress" from GOBP](enrichment_plot_ERStress.png)
+![Figure 2: Enrichment plot for "Response to ER stress" from GOBP](a3figs/enrichment_plot_ERStress.png)
 
 The top terms associated with the upregulated genes are all related to ER stress response and more interestingly, unfolded protein response. In particular, ERAD (ER assocaited protein degradation) pathway is also one of the top terms. Those pathways and mechanisms are also discussed in the literature. We will explore those pathway using network analysis in the next section.
 
